@@ -3,6 +3,7 @@
 <title>Test the VideoDecoder API.</title>
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
+<script src="/webcodecs/utils.js"></script>
 <script>
 'use strict';
 
@@ -53,77 +54,35 @@ function getFakeChunk() {
   });
 }
 
-// Calls done after giving async output/error callbacks a final chance to run.
-async function asyncDone(test) {
-  test.step_timeout(test.step_func_done(), 0);
-}
-
-async_test(async (t) => {
+promise_test(t => {
   // VideoDecoderInit lacks required fields.
   assert_throws_js(TypeError, () => { new VideoDecoder({}); });
 
   // VideoDecoderInit has required fields.
-  let decoder = new VideoDecoder({
-    output(chunk) { t.unreached_func("Unexpected output").call(); },
-    error(error) { t.unreached_func("Unexpected error:" + error).call(); },
-  });
+  let decoder = new VideoDecoder(getDefaultCodecInit(t));
 
   assert_equals(decoder.state, "unconfigured");
 
-  asyncDone(t);
+  decoder.close();
+
+  return endAfterEventLoopTurn(t);
 }, 'Test VideoDecoder construction');
 
-async_test(async (t) => {
-  let decoder = new VideoDecoder({
-    output(chunk) { t.unreached_func("Unexpected output").call(); },
-    error(error) { t.unreached_func("Unexpected error:" + error).call(); },
-  });
+promise_test(t => {
+  let decoder = new VideoDecoder(getDefaultCodecInit(t));
 
-  let config = {};
+  let badCodecsList = [
+    '',                         // Empty codec
+    'bogus',                    // Non exsitent codec
+    'vorbis',                   // Audio codec
+    'vp9',                      // Ambiguous codec
+    'video/webm; codecs="vp9"'  // Codec with mime type
+  ]
 
-  // Bogus codec rejected.
-  config.codec = 'bogus';
-  assert_throws_js(TypeError, () => { decoder.configure(config); });
+  testConfigurations(decoder, { codec: vp9.codec }, badCodecsList);
 
-  // Audio codec rejected.
-  config.codec = 'vorbis';
-  assert_throws_js(TypeError, () => { decoder.configure(config); });
-
-  // Ambiguous codec rejected.
-  config.codec = 'vp9';
-  assert_throws_js(TypeError, () => { decoder.configure(config); });
-
-  // Codec with mime type rejected.
-  config.codec = 'video/webm; codecs="vp9"';
-  assert_throws_js(TypeError, () => { decoder.configure(config); });
-
-  // Valid unambiguous codec accepted.
-  config.codec = 'vp09.00.10.08';
-  decoder.configure(config);
-
-  assert_equals(decoder.state, "configured");
-
-  // Verify a failed reconfigure does not affect the current configuration.
-  config.codec = 'bogus';
-  assert_throws_js(TypeError, () => { decoder.configure(config); });
-
-  assert_equals(decoder.state, "configured");
-
-  // Verify we can reconfigure.
-  config.codec = 'vp09.00.10.08';
-  decoder.configure(config);
-
-  assert_equals(decoder.state, "configured");
-
-  // Test we can configure after a reset.
-  decoder.reset()
-  assert_equals(decoder.state, "unconfigured");
-
-  decoder.configure(config);
-  assert_equals(decoder.state, "configured");
-
-  asyncDone(t);
-}, 'Test VideoDecoder.configure() codec validity');
+  return endAfterEventLoopTurn(t);
+}, 'Test VideoDecoder.configure()');
 
 promise_test(t => vp9.buffer.then(buffer => {
   let numOutputs = 0;
@@ -159,78 +118,23 @@ promise_test(t => vp9.buffer.then(buffer => {
 }), 'Decode VP9');
 
 promise_test(t => {
-  let decoder = new VideoDecoder({
-    output(frame) {
-      t.step(() => {
-        throw "unexpected output";
-      });
-    },
-    error(e) {
-      t.step(() => {
-        throw "unexpected error";
-      });
-    }
-  });
+  let decoder = new VideoDecoder(getDefaultCodecInit(t));
 
-  decoder.close();
-
-  assert_equals(decoder.state, "closed");
-
-  let fakeChunk = getFakeChunk();
-  assert_throws_dom("InvalidStateError",
-                    () => decoder.configure({codec: vp9.codec}),
-                    "configure");
-  assert_throws_dom("InvalidStateError",
-                    () => decoder.decode(fakeChunk),
-                    "decode");
-  assert_throws_dom("InvalidStateError",
-                    () => decoder.reset(),
-                    "reset");
-  assert_throws_dom("InvalidStateError",
-                    () => decoder.close(),
-                    "close");
-  return promise_rejects_dom(t, 'InvalidStateError', decoder.flush(), 'flush');
-}, 'Closed decoder');
+  return testClosedCodec(t, decoder, { codec: vp9.codec }, getFakeChunk());
+}, 'Verify closed VideoDecoder operations');
 
 promise_test(t => {
-  let decoder = new VideoDecoder({
-    output(frame) {
-      t.step(() => {
-        throw "unexpected output";
-      });
-    },
-    error(e) {
-      t.step(() => {
-        throw "unexpected error";
-      });
-    }
-  });
+  let decoder = new VideoDecoder(getDefaultCodecInit(t));
 
-  assert_equals(decoder.state, "unconfigured");
-
-  // Reseting an unconfigured encoder is a no-op.
-  decoder.reset();
-  assert_equals(decoder.state, "unconfigured");
-
-  let fakeChunk = getFakeChunk();
-  assert_throws_dom("InvalidStateError",
-                    () => decoder.decode(fakeChunk),
-                    "decode");
-  return promise_rejects_dom(t, 'InvalidStateError', decoder.flush(), 'flush');
-}, 'Unconfigured decoder');
+  return testUnconfiguredCodec(t, decoder, getFakeChunk());
+}, 'Verify unconfigured VideoDecoder operations');
 
 promise_test(t => {
   let numErrors = 0;
-  let decoder = new VideoDecoder({
-    output(frame) {
-      t.step(() => {
-        throw "unexpected output";
-      });
-    },
-    error(e) {
-      numErrors++;
-    }
-  });
+  let codecInit = getDefaultCodecInit(t);
+  codecInit.error = _ => numErrors++;
+
+  let decoder = new VideoDecoder(codecInit);
 
   decoder.configure({codec: vp9.codec});
 
@@ -247,16 +151,10 @@ promise_test(t => {
 
 promise_test(t => {
   let numErrors = 0;
-  let decoder = new VideoDecoder({
-    output(frame) {
-      t.step(() => {
-        throw "unexpected output";
-      });
-    },
-    error(e) {
-      numErrors++;
-    }
-  });
+  let codecInit = getDefaultCodecInit(t);
+  codecInit.error = _ => numErrors++;
+
+  let decoder = new VideoDecoder(codecInit);
 
   decoder.configure({codec: vp9.codec});
 
@@ -269,19 +167,7 @@ promise_test(t => {
 }, 'Decode empty VP9 frame');
 
 promise_test(t => {
-  let decoder = new VideoDecoder({
-    output(frame) {
-      t.step(() => {
-        throw "unexpected output";
-      });
-    },
-    error(e) {
-      t.step(() => {
-        // TODO(sandersd): Change to 'throw e' once e is defined.
-        throw "decode error";
-      });
-    }
-  });
+  let decoder = new VideoDecoder(getDefaultCodecInit(t));
 
   decoder.configure({codec: vp9.codec});
 
